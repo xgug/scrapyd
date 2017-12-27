@@ -1,21 +1,15 @@
-import sys
 import uuid
 import os
-from datetime import datetime
-from multiprocessing import cpu_count
+import math
 
-from twisted.internet import reactor, defer, protocol, error
 from twisted.application.service import Service
 from twisted.python import log
 from twisted.application.service import IServiceCollection
-
-from scrapyd.utils import get_crawl_args, native_stringify_dict
-from scrapyd import __version__
-from .interfaces import IPoller, IEnvironment
+from decimal import Decimal
 
 from collections import defaultdict
-from .spiderqueue import  RedisSpiderQueue
-from .interfaces import IEggStorage, IPoller, ISpiderScheduler, IEnvironment
+from .spiderqueue import RedisSpiderQueue
+from .interfaces import ISpiderScheduler
 
 
 class Controller(Service):
@@ -32,19 +26,9 @@ class Controller(Service):
         self.spider_config = dict(config.items('spdier'))
 
     def startService(self):
-        # for slot in range(self.max_proc):
-        #   print('=='*100)
-        #   print(slot)
-        #
-        # print('-'*100)
-        # print(self.max_proc)
-        print(self.config._getsources())
-        print('-=' * 50)
-        # launcher = self.app.getServiceNamed('launcher')
-        print(self.launcher.processes.values())
 
-    def poll_test(self):
-        print('-' * 50 + 'poll test!' + '-' * 50)
+        log.msg('The monitor of spider process is start!')
+
 
     @property
     def launcher(self):
@@ -80,9 +64,9 @@ class Controller(Service):
     def _get_spider_data_lenght(self, spider_name):
         """get count of spider data from redis queue"""
         c = dict(self.config.items('redis'))
-        password = c['password'] if c['password'] else None
+        password = c.get('password', None)
 
-        return RedisSpiderQueue(spider_name, db=int(c['db']), password=password, host=c['host'], port=int(c['port'])).count()
+        return RedisSpiderQueue(key=spider_name, db=int(c['db']), password=password, host=c['host'], port=int(c['port'])).count()
 
     def _get_spider_conf_process_total(self, spider_name):
         """config of running spdier"""
@@ -90,7 +74,7 @@ class Controller(Service):
         split_piece = int(self.config.get('split_piece', 2000))
 
         update_data_total = self._get_spider_data_lenght(spider_name)
-        need_spiders = int(update_data_total / split_piece)
+        need_spiders = int(math.ceil(Decimal(update_data_total) / Decimal(split_piece)))
 
         limit_total = int(self.spider_config.get(spider_name, 0))
         if need_spiders > limit_total:
@@ -105,7 +89,7 @@ class Controller(Service):
 
         for x in range(total):
             self.scheduler.schedule(project, spider, **args)
-            log.msg('start <spdier> : %s', spider)
+            log.msg('start <spdier> : ', spider)
 
     def _if_cancel_spider_process(self, project, spider_name, total):
         """ stop spdier"""
@@ -121,7 +105,6 @@ class Controller(Service):
             if self._get_available_spiders(s.spider):
                 spiders[s.spider] += 1
 
-        # spiders = self._get_running_spider_count(project)
         stop_jobs = []
         if total > 0 and spiders.get(spider_name, 0) > total:
 
@@ -130,7 +113,7 @@ class Controller(Service):
                 s.transport.signalProcess('TERM')
                 stop_jobs.append({'spider': s.spider, 'jobid': s.job})
 
-        log.msg('stop spiders : %s', stop_jobs)
+        log.msg('stop spiders : ', stop_jobs)
 
         return stop_jobs
 
@@ -139,16 +122,16 @@ class Controller(Service):
         log.msg('poll monitor process of spdier. <project> ', project)
         running_spiders = self._get_running_spider_count(project)
 
-        for spider_name, total in running_spiders.items():
+        # for spider_name, total in running_spiders.items():
+        for spider_name in self.spider_config.keys():
             # checkout the spider is exist in spider config.
-            if spider_name in self.spider_config:
-                config_total = self._get_spider_conf_process_total(spider_name)
-                n_t = config_total - total
+            config_total = self._get_spider_conf_process_total(spider_name)
+            n_t = config_total - int(running_spiders.get(spider_name, 0))
 
-                log.msg('Need to handle <spider> <total> ', spider_name, n_t)
+            log.msg('Need to handle', ' <total> ', n_t, ' <spider> ', spider_name)
 
-                if n_t > 0:
-                    # added new process of spider for needing total of config.
-                    self._add_spider_process(project, spider_name, n_t)
-                elif n_t < 0:
-                    self._if_cancel_spider_process(project, spider_name, n_t)
+            if n_t > 0:
+                # added new process of spider for needing total of config.
+                self._add_spider_process(project, spider_name, n_t)
+            elif n_t < 0:
+                self._if_cancel_spider_process(project, spider_name, n_t)

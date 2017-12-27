@@ -44,8 +44,13 @@ class RedisSpiderQueue(object):
     """store by redis"""
 
     def __init__(self, key='sort_name', db=0, password=None, host='localhost', port=6379, decode_responses=True):
+        if password:
+            print('-='*50)
+            print(password)
+            self.redis = redis.Redis(db=db, password=password, host=host, port=port, decode_responses=decode_responses)
+        else:
+            self.redis = redis.Redis(db=db, host=host, port=port, decode_responses=decode_responses)
 
-        self.redis = redis.Redis(db=db, password=password, host=host, port=port, decode_responses=decode_responses)
         self.key = key
 
     # @property
@@ -59,8 +64,8 @@ class RedisSpiderQueue(object):
         pass
 
     def count(self):
-        # return self.redis.zcard(self.key)
-        return 6000
+        return self.redis.zcard(self.key)
+        # return 6000
 
     def list(self):
         pass
