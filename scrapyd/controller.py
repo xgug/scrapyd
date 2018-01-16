@@ -29,6 +29,16 @@ class Controller(Service):
 
         log.msg('The monitor of spider process is start!')
 
+    def stopService(self):
+        log.msg('The monitor of spider process is stop!!!')
+
+        stop_jobs = []
+        for s in self.launcher.processes.values():
+            s.transport.signalProcess('TERM')
+            stop_jobs.append({'spider': s.spider, 'jobid': s.job})
+
+        log.msg('Stop the process:', stop_jobs)
+
 
     @property
     def launcher(self):
