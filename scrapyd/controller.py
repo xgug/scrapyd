@@ -83,7 +83,12 @@ class Controller(Service):
 
         split_piece = int(self.config.get('split_piece', 2000))
 
-        update_data_total = self._get_spider_data_lenght(spider_name)
+        try:
+            update_data_total = self._get_spider_data_lenght(spider_name)
+        except Exception as e:
+            update_data_total = 0
+            log.msg('redis connect fail!!! : ', e)
+
         need_spiders = int(math.ceil(Decimal(update_data_total) / Decimal(split_piece)))
 
         limit_total = int(self.spider_config.get(spider_name, 0))
