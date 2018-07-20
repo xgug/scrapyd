@@ -125,7 +125,8 @@ class Controller(Service):
 
             stop_spiders = running_spiders[0:total]
             for s in stop_spiders:
-                s.transport.signalProcess('TERM')
+                # s.transport.signalProcess('TERM')
+                s.transport.signalProcess('KILL')
                 stop_jobs.append({'spider': s.spider, 'jobid': s.job})
 
         log.msg('stop spiders : ', stop_jobs)
