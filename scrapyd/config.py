@@ -62,3 +62,7 @@ class Config(object):
             if default is not None:
                 return default
             raise
+
+    def has_section(self, section):
+        """add section checking."""
+        return self.cp.has_section(section)

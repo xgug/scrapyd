@@ -1,15 +1,13 @@
 import uuid
 import os
-import math
 
 from twisted.application.service import Service
 from twisted.python import log
 from twisted.application.service import IServiceCollection
-from decimal import Decimal
 
 from collections import defaultdict
 from .spiderqueue import RedisSpiderQueue
-from .interfaces import ISpiderScheduler
+from .interfaces import ISpiderScheduler, IPoller
 
 
 class Controller(Service):
@@ -23,7 +21,11 @@ class Controller(Service):
         # self.runner = config.get('runner', 'scrapyd.runner')
         self.app = app
         self.config = config
-        self.spider_config = dict(config.items('spdier'))
+        self.section_suffix = os.environ.get('REGION', 'us')
+
+        self.spider_section = ''.join(['spdier', '_', self.section_suffix])
+        self.redis_section = ''.join(['redis', '_', self.section_suffix])
+        self.project = self.config.get('project')
 
     def startService(self):
 
@@ -49,6 +51,10 @@ class Controller(Service):
     def scheduler(self):
         return self.app.getComponent(ISpiderScheduler)
 
+    @property
+    def poller(self):
+        return self.app.getComponent(IPoller)
+
     def _get_available_spiders(self, spider):
         config = dict(self.config.items('spider_monitor_config'))
         path = config['stop_tag_path']
@@ -58,22 +64,36 @@ class Controller(Service):
 
         return spider in self.spider_config and not os.path.exists(spider_stop_file) and not os.path.exists(stop_all_tag_file)
 
-    def _get_running_spider_count(self, project):
-        spiders = self.launcher.processes.values()
+    @property
+    def _all_spider_count(self):
+        project = self.project
+        processes = self.launcher.processes.values()
+        queues = self.poller.queues
+        # log.msg("processes: %s", processes)
 
-        running = defaultdict(int)
+        running = [{"project": project, "spider": p.spider, "id": p.job} for p in processes
+                   if p.project == project]
+
+        pending = [{"project": project, "spider": x["name"], "id": x["_job"]} for x in queues[project].list()]
+
+        spiders = running + pending
+
+        total_spiders = defaultdict(int)
         # log.msg('project and process', project, spiders)
 
         for s in spiders:
+            if self._get_available_spiders(s.get('spider', 'none')):
+                total_spiders[s.get('spider', 'none')] += 1
 
-            if s.project == project and self._get_available_spiders(s.spider):
-                running[s.spider] += 1
+        return total_spiders
 
-        return running
+    def _get_spider_count(self, spider_name):
+
+        return self._all_spider_count.get(spider_name, 0)
 
     def _get_spider_data_lenght(self, spider_name):
         """get count of spider data from redis queue"""
-        c = dict(self.config.items('redis'))
+        c = self.redis_config
         password = c.get('password', None)
 
         return RedisSpiderQueue(key=spider_name, db=int(c['db']), password=password, host=c['host'], port=int(c['port'])).count()
@@ -81,47 +101,50 @@ class Controller(Service):
     def _get_spider_conf_process_total(self, spider_name):
         """config of running spdier"""
 
-        split_piece = int(self.config.get('split_piece', 2000))
-
         try:
             update_data_total = self._get_spider_data_lenght(spider_name)
         except Exception as e:
             update_data_total = 0
             log.msg('redis connect fail!!! : ', e)
 
-        need_spiders = int(math.ceil(Decimal(update_data_total) / Decimal(split_piece)))
+        # need_spiders = int(math.ceil(Decimal(update_data_total) / Decimal(split_piece)))
 
         limit_total = int(self.spider_config.get(spider_name, 0))
-        if need_spiders > limit_total:
-            need_spiders = limit_total
+
+        need_spiders = 0
+        if update_data_total > 0:
+            need_spiders = limit_total - self._get_spider_count(spider_name)
+
+            # if need_spiders < 0:
+            #     need_spiders = 0
 
         return need_spiders
 
-    def _add_spider_process(self, project, spider, total):
+    def _add_spider_process(self, project, spider_name, total):
         """for schedule total of total spdier."""
         jobid = uuid.uuid1().hex
         args = {'_job': jobid}
 
-        for x in range(total):
-            self.scheduler.schedule(project, spider, **args)
-            log.msg('start <spdier> : ', spider)
+        if self._get_available_spiders(spider_name):
+            for x in range(total):
+                self.scheduler.schedule(project, spider_name, **args)
+                log.msg('start <spdier> : ', spider_name)
 
     def _if_cancel_spider_process(self, project, spider_name, total):
         """ stop spdier"""
         total = -total if total < 0 else total
 
-        running_spiders = [s for s in self.launcher.processes.values() if s.spider==spider_name and s.project==project]
+        running_spiders = [s for s in self.launcher.processes.values() if s.spider == spider_name and s.project == project]
 
         spiders = defaultdict(int)
         log.msg('project and process', project, running_spiders)
 
         for s in running_spiders:
-
-            if self._get_available_spiders(s.spider):
-                spiders[s.spider] += 1
+            # if self._get_available_spiders(s.spider):
+            spiders[s.spider] += 1
 
         stop_jobs = []
-        if total > 0 and spiders.get(spider_name, 0) > total:
+        if spiders.get(spider_name, 0) > total:
 
             stop_spiders = running_spiders[0:total]
             for s in stop_spiders:
@@ -133,21 +156,44 @@ class Controller(Service):
 
         return stop_jobs
 
+    def _check_redis(self):
+        """check redis is available."""
+        c = self.redis_config
+        password = c.get('password', None)
+
+        try:
+            RedisSpiderQueue(key='test', db=int(c['db']), password=password, host=c['host'], port=int(c['port'])).count()
+            return True
+        except Exception as e:
+            return False
+
     def poll_monitor_spider_process(self):
-        project = self.config.get('project')
+        project = self.project
         log.msg('poll monitor process of spdier. <project> ', project)
-        running_spiders = self._get_running_spider_count(project)
+        if not self.config.has_section(self.spider_section) and not self.config.has_section(self.redis_section):
+            log.msg("Have not config of spider_section or redis_section at region: ", os.environ.get('REGION', 'us'))
+
+            return
+
+        self.spider_config = dict(self.config.items(self.spider_section))
+        self.redis_config = dict(self.config.items(self.redis_section))
+
+        if not self._check_redis():
+            log.msg("Redis is unavailable, please check it!")
+
+            return
 
         # for spider_name, total in running_spiders.items():
         for spider_name in self.spider_config.keys():
             # checkout the spider is exist in spider config.
             config_total = self._get_spider_conf_process_total(spider_name)
-            n_t = config_total - int(running_spiders.get(spider_name, 0))
+            # n_t = config_total - int(running_spiders.get(spider_name, 0))
 
-            log.msg('Need to handle', ' <total> ', n_t, ' <spider> ', spider_name)
-
-            if n_t > 0:
+            if config_total > 0:
+                log.msg('Need to handle add', ' <total> ', config_total, ' <spider> ', spider_name)
                 # added new process of spider for needing total of config.
-                self._add_spider_process(project, spider_name, n_t)
-            elif n_t < 0:
-                self._if_cancel_spider_process(project, spider_name, n_t)
+                self._add_spider_process(project, spider_name, config_total)
+            elif config_total < 0:
+                log.msg('Need to handle cancel', ' <total> ', config_total, ' <spider> ', spider_name)
+
+                self._if_cancel_spider_process(project, spider_name, config_total)
